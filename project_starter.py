@@ -760,7 +760,26 @@ def check_item_stock(item_name: str, as_of_date: str) -> str:
     # Hint: An item can exist in paper_supplies but not be carried in inventory (stock 0).
     #       Handle that case, and the "not found anywhere" case, with clear messages.
     # Hint: Flag reorder when stock <= min_stock_level. Return a readable multi-line string.
-    raise NotImplementedError("TODO: implement check_item_stock")
+    resolved = _resolve_item_name(item_name)
+    if resolved is None:
+        return f"'{item_name}' is not in the catalog and is unavailable."
+
+    stock_df = get_stock_level(resolved, as_of_date)
+    stock = int(stock_df["current_stock"].iloc[0]) if not stock_df.empty else 0
+    inv_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :name",
+                         db_engine, params={"name": resolved})
+
+    if inv_df.empty:
+        unit_price = next(p["unit_price"] for p in paper_supplies if p["item_name"] == resolved)
+        return (f"{resolved}: not carried in inventory (stock 0) as of {as_of_date}.\n"
+                f"  Catalog price ${unit_price:.2f}/unit - must be ordered from the supplier.")
+
+    unit_price = float(inv_df["unit_price"].iloc[0])
+    min_level = int(inv_df["min_stock_level"].iloc[0])
+    return (f"{resolved} as of {as_of_date}:\n"
+            f"  stock={stock}, min_level={min_level}, unit_price=${unit_price:.2f}\n"
+            f"  reorder needed: {'YES' if stock <= min_level else 'NO'}")
+    # raise NotImplementedError("TODO: implement check_item_stock")
 
 
 @tool
@@ -787,8 +806,29 @@ def reorder_stock(item_name: str, quantity: int, order_date: str) -> str:
     # Hint: Get the arrival date with get_supplier_delivery_date(order_date, quantity).
     # Hint: Record it: create_transaction(item_name, "stock_orders", quantity, total_cost,
     #       delivery_date). Return a confirmation string including the transaction id.
-    raise NotImplementedError("TODO: implement reorder_stock")
+    # raise NotImplementedError("TODO: implement reorder_stock")
 
+    resolved = _resolve_item_name(item_name)
+    if resolved is None:
+        return f"Cannot reorder: '{item_name}' is not in the catalog."
+
+    inv_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :name",
+                         db_engine, params={"name": resolved})
+    unit_price = float(inv_df["unit_price"].iloc[0]) if not inv_df.empty else next(
+        (p["unit_price"] for p in paper_supplies if p["item_name"] == resolved), None)
+    if unit_price is None:
+        return f"Cannot reorder: no price on record for '{resolved}'."
+
+    total_cost = quantity * unit_price
+    cash = get_cash_balance(order_date)
+    if total_cost > cash:
+        return (f"Cannot reorder {quantity} units of {resolved}: cost ${total_cost:.2f} exceeds "
+                f"the cash balance of ${cash:.2f} as of {order_date}.")
+
+    delivery_date = get_supplier_delivery_date(order_date, quantity)
+    tx_id = create_transaction(resolved, "stock_orders", quantity, total_cost, delivery_date)
+    return (f"Reordered {quantity} units of {resolved} for ${total_cost:.2f} (transaction {tx_id}). "
+            f"Expected delivery {delivery_date}. Cash remaining: ${cash - total_cost:.2f}")
 
 # Tools for quoting agent
 
@@ -811,8 +851,21 @@ def get_quote_history(search_terms: str) -> str:
     #       like 'original_request', 'total_amount', 'quote_explanation', 'job_type',
     #       'order_size', 'event_type'.
     # Hint: If the list is empty, say so. Otherwise format each result into a few lines.
-    raise NotImplementedError("TODO: implement get_quote_history")
+    # raise NotImplementedError("TODO: implement get_quote_history")
 
+    terms = [t.strip() for t in search_terms.split(",") if t.strip()]
+    results = search_quote_history(terms, limit=5)
+    if not results:
+        return f"No historical quotes found for: {', '.join(terms)}"
+
+    result_lines = [f"{len(results)} historical quote(s) for: {', '.join(terms)}"]
+    for q in results:
+        result_lines.append(
+            f"\n  Amount: ${float(q['total_amount']):.2f} | job={q['job_type']} | "
+            f"size={q['order_size']} | event={q['event_type']}\n"
+            f"  Request: {str(q['original_request'])[:150]}\n"
+            f"  Reasoning: {str(q['quote_explanation'])[:200]}")
+    return "\n".join(result_lines)
 
 @tool
 def generate_quote(item_name: str, quantity: int, as_of_date: str) -> str:
@@ -842,8 +895,37 @@ def generate_quote(item_name: str, quantity: int, as_of_date: str) -> str:
     # Hint: Decide availability: fully in stock (deliver on as_of_date), partial (compute the
     #       shortfall and use get_supplier_delivery_date(as_of_date, shortfall)), or out of
     #       stock (order the full quantity). Return a clear, formatted quote string.
-    raise NotImplementedError("TODO: implement generate_quote")
+    # raise NotImplementedError("TODO: implement generate_quote")
+    resolved = _resolve_item_name(item_name)
+    if resolved is None:
+        return f"Cannot quote '{item_name}': not available in our catalog."
 
+    inv_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :name",
+                         db_engine, params={"name": resolved})
+    unit_price = float(inv_df["unit_price"].iloc[0]) if not inv_df.empty else next(
+        (p["unit_price"] for p in paper_supplies if p["item_name"] == resolved), None)
+    if unit_price is None:
+        return f"Cannot quote '{item_name}': no price on record for '{resolved}'."
+
+    stock_df = get_stock_level(resolved, as_of_date)
+    stock = int(stock_df["current_stock"].iloc[0]) if not stock_df.empty else 0
+
+    discount = 0.15 if quantity >= 1000 else 0.10 if quantity >= 500 else 0.05 if quantity >= 100 else 0.0
+    base_price = quantity * unit_price
+    total = base_price * (1 - discount)
+
+    if stock >= quantity:
+        availability, delivery_date = f"in stock ({stock} units on hand)", as_of_date
+    else:
+        shortfall = quantity - stock
+        delivery_date = get_supplier_delivery_date(as_of_date, shortfall)
+        availability = f"{stock} in stock, {shortfall} to be ordered from the supplier"
+
+    return (f"QUOTE for {quantity} units of {resolved} (as of {as_of_date}):\n"
+            f"  Unit price ${unit_price:.2f} -> subtotal ${base_price:.2f}\n"
+            f"  Bulk discount {discount * 100:.0f}% -> TOTAL ${total:.2f}\n"
+            f"  Availability: {availability}\n"
+            f"  Estimated delivery: {delivery_date}")
 
 # Tools for ordering agent
 
@@ -878,8 +960,44 @@ def fulfill_order(item_name: str, quantity: int, order_date: str) -> str:
     #   5. Record the sale:
     #        create_transaction(item_name, "sales", quantity, sale_price, fulfillment_date)
     #   6. Return a confirmation string (item, quantity, total sale, fulfillment date, tx id).
-    raise NotImplementedError("TODO: implement fulfill_order")
+    # raise NotImplementedError("TODO: implement fulfill_order")
 
+    resolved = _resolve_item_name(item_name)
+    if resolved is None:
+        return f"Cannot fulfill: '{item_name}' is not available in our catalog."
+
+    inv_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :name",
+                         db_engine, params={"name": resolved})
+    unit_price = float(inv_df["unit_price"].iloc[0]) if not inv_df.empty else next(
+        (p["unit_price"] for p in paper_supplies if p["item_name"] == resolved), None)
+    if unit_price is None:
+        return f"Cannot fulfill: no price on record for '{resolved}'."
+
+    stock_df = get_stock_level(resolved, order_date)
+    stock = int(stock_df["current_stock"].iloc[0]) if not stock_df.empty else 0
+
+    discount = 0.15 if quantity >= 1000 else 0.10 if quantity >= 500 else 0.05 if quantity >= 100 else 0.0
+    sale_price = quantity * unit_price * (1 - discount)
+
+    restock = ""
+    if stock < quantity:
+        shortfall = quantity - stock
+        reorder_cost = shortfall * unit_price
+        cash = get_cash_balance(order_date)
+        if cash < reorder_cost:
+            return (f"Cannot fulfill {quantity} units of {resolved}: only {stock} in stock and "
+                    f"restocking {shortfall} units costs ${reorder_cost:.2f}, over the "
+                    f"${cash:.2f} cash balance. Not available in this quantity.")
+        fulfillment_date = get_supplier_delivery_date(order_date, shortfall)
+        create_transaction(resolved, "stock_orders", shortfall, reorder_cost, fulfillment_date)
+        restock = f" (restocked {shortfall} units for ${reorder_cost:.2f})"
+    else:
+        fulfillment_date = order_date
+
+    tx_id = create_transaction(resolved, "sales", quantity, sale_price, fulfillment_date)
+    return (f"ORDER FULFILLED: {quantity} units of {resolved} for ${sale_price:.2f} "
+            f"({discount * 100:.0f}% bulk discount), fulfillment date {fulfillment_date}"
+            f"{restock}. Transaction {tx_id}.")
 
 @tool
 def check_cash_balance(as_of_date: str) -> str:
@@ -975,15 +1093,35 @@ inventory_agent = ToolCallingAgent(
 # Hint: tools should be the quoting-related ones: [get_quote_history, generate_quote, check_item_stock]
 # Hint: pass model=model, name="quoting_agent", a short description of what it does, and max_steps=6.
 # Hint: in the description, remind it to use the request date and EXACT catalog item names.
-quoting_agent = None  # <-- replace None with a ToolCallingAgent(...)
+quoting_agent = ToolCallingAgent(
+    tools=[get_quote_history, generate_quote, check_item_stock],
+    model=model,
+    name="quoting_agent",
+    description=(
+        "Generates customer price quotes: checks comparable past quotes and current stock, then "
+        "prices the request with bulk discounts and a delivery estimate. "
+        "IMPORTANT: always pass the request date (YYYY-MM-DD) and EXACT catalog item names."
+    ),
+    max_steps=6,
+)
 
 # Sales/Order Agent - handles order fulfillment
 # TODO: Build the sales agent (same pattern as the others).
 # Hint: tools should include fulfillment and checking: [fulfill_order, check_item_stock,
 #       check_cash_balance, get_financial_summary]
 # Hint: pass model=model, name="sales_agent", a description, and max_steps=8.
-sales_agent = None  # <-- replace None with a ToolCallingAgent(...)
-
+sales_agent = ToolCallingAgent(
+    tools=[fulfill_order, check_item_stock, check_cash_balance, get_financial_summary],
+    model=model,
+    name="sales_agent",
+    description=(
+        "Fulfills customer orders by recording sales, restocking from the supplier when stock is "
+        "short, and reporting cash or financial summaries. "
+        "IMPORTANT: always pass the request date (YYYY-MM-DD) as order_date and EXACT catalog "
+        "item names; fulfill one item per call and report anything unfulfilled and why."
+    ),
+    max_steps=8,
+)
 # Orchestrator Agent - delegates to the specialist agents
 # TODO: Build the orchestrator. This is the agent the test harness calls.
 # Hints:
@@ -999,8 +1137,21 @@ sales_agent = None  # <-- replace None with a ToolCallingAgent(...)
 #          items that could not be fulfilled and why.
 #   - Use max_steps=10.
 #   - Keep the variable name `orchestrator_agent` (run_test_scenarios below calls it).
-orchestrator_agent = None  # <-- replace None with a ToolCallingAgent(...)
-
+orchestrator_agent = ToolCallingAgent(
+    tools=[],
+    model=model,
+    managed_agents=[inventory_agent, quoting_agent, sales_agent],
+    name="orchestrator_agent",
+    description=_agent_catalog_note + (
+        "\nWORKFLOW:\n"
+        "1. Ask quoting_agent to quote each requested item, passing the exact request date.\n"
+        "2. Ask sales_agent to fulfill the items that can be fulfilled.\n"
+        "3. Ask inventory_agent to reorder anything that needs restocking first, then retry.\n"
+        "4. Reply with per-item price, status, delivery date, and any item not fulfilled and why."
+    ),
+    max_steps=10,
+    max_tool_threads=1 #fixes issue with max steps + 1 being called twice in parallel workflows. 
+)
 
 # Run your test scenarios by writing them here. Make sure to keep track of them.
 
