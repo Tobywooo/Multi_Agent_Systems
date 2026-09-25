@@ -1,0 +1,71 @@
+ARCHITECTURE
+
+One orchestrator delegates to three specialists. Agents talk only in text; all state lives in the database.
+
+orchestrator_agent  (tools=[], max_steps=10, max_tool_threads=1)
+    inventory_agent (max_steps=6)  check_inventory, check_item_stock, reorder_stock
+    quoting_agent   (max_steps=6)  get_quote_history, generate_quote, check_item_stock
+    sales_agent     (max_steps=8)  fulfill_order, check_item_stock, check_cash_balance
+
+Agent Responsibilities
+
+orchestrator_agent: Parses the request into (item, quantity) pairs and delegates. Owns no tools.
+inventory_agent: Stock questions and supplier restocking.
+quoting_agent: Pricing only -- never writes to the database.
+sales_agent: Records sales, restocking first if stock is short.
+
+Orchestrator workflow: quote each item, fulfill what's possible, reorder anything short, reply with per-item price, status, delivery date, and reasons for anything unfulfilled.
+
+
+TOOLS
+
+[W] marks the only two tools that write to the database.
+
+check_inventory: Whole-catalog snapshot, flags items at/below min level. Wraps get_all_inventory.
+check_item_stock: Stock, price, min level, reorder flag for one item. Shared by all three agents. Wraps _resolve_item_name, get_stock_level.
+reorder_stock [W]: Buys stock from the supplier if cash covers it. Wraps get_cash_balance, get_supplier_delivery_date, create_transaction.
+get_quote_history: Up to 5 comparable past quotes, for pricing consistency. Wraps search_quote_history.
+generate_quote: Price with bulk discount, availability, delivery estimate. Wraps _resolve_item_name, get_stock_level, get_supplier_delivery_date.
+fulfill_order [W]: Books the sale; auto-restocks the shortfall first. Wraps get_stock_level, get_cash_balance, get_supplier_delivery_date, create_transaction x2.
+check_cash_balance: One-line cash figure. Wraps get_cash_balance.
+get_financial_summary: Cash, inventory value, total assets, top 5 sellers. Wraps generate_financial_report.
+
+Tools that look up a unit price read the inventory table first and fall back to the paper_supplies catalog, so catalog items we don't currently stock can still be quoted and ordered.
+
+
+BUSINESS RULES
+
+Item matching. _resolve_item_name maps customer wording to a catalog name by exact match, substring, then keyword overlap. Unmatched items are reported as unavailable.
+
+Bulk discounts (identical in generate_quote and fulfill_order):
+
+    1000 or more units: 15% discount
+    500 or more units: 10% discount
+    100 or more units: 5% discount
+    Fewer than 100 units: no discount
+
+Supplier lead time (get_supplier_delivery_date): 10 units or fewer same day, 11-100 one day, 101-1000 four days, more than 1000 seven days.
+
+Restocking. If stock is less than quantity, fulfill_order orders the shortfall, but only when the cash balance covers it. If not, the order is refused with the reason.
+
+Cash guard. Both writing tools check get_cash_balance before spending. Starting cash is $50,000; the seeded inventory covers 40% of the catalog (seed 137).
+
+
+DATA MODEL
+
+Four SQLite tables, recreated by init_database on each run:
+
+transactions: Ledger of stock_orders and sales. Stock and cash are derived from it.
+inventory: Items we carry, with unit price and min stock level.
+quotes / quote_requests: Historical quotes used by get_quote_history.
+
+
+KNOWN BEHAVIOURS
+
+Sales are dated on the delivery date. When an order needs restocking, the sale is recorded on the supplier's delivery date rather than the request date. The cash change therefore shows up against a later request in test_results.csv, not the one that triggered it.
+
+max_tool_threads=1 on the orchestrator. smolagents executes multiple tool calls from one step in a thread pool. Two concurrent calls to the same managed agent corrupt its shared step_number and raise UnboundLocalError: final_answer. A single worker serializes delegation and avoids this.
+
+Fuzzy matching is deliberately loose. "matte A3 paper" resolves to Matte paper -- A3 isn't in the catalog, but the "matte" keyword matches. Loose matching fulfills more orders at the cost of occasionally substituting a near neighbour.
+
+Tools can't call each other. fulfill_order repeats reorder_stock's restock logic rather than reusing it, so a shortfall inside a sale writes its own stock_orders row before the sales row.
