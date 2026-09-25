@@ -16,7 +16,7 @@ db_engine = create_engine("sqlite:///munder_difflin.db")
 paper_supplies = [
     # Paper Types (priced per sheet unless specified)
     {"item_name": "A4 paper",                         "category": "paper",        "unit_price": 0.05},
-    {"item_name": "Letter-sized paper",              "category": "paper",        "unit_price": 0.06},
+    {"item_name": "Letter-sized paper",               "category": "paper",        "unit_price": 0.06},
     {"item_name": "Cardstock",                        "category": "paper",        "unit_price": 0.15},
     {"item_name": "Colored paper",                    "category": "paper",        "unit_price": 0.10},
     {"item_name": "Glossy paper",                     "category": "paper",        "unit_price": 0.20},

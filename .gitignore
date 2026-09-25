@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+submission.zip
+submission/design_notes.txt.txt
+.gitignore
+submission/project_starter.py
+.gitignore
+submission/test_results.csv
+.gitignore
+submission/Flow_Diagram.png
