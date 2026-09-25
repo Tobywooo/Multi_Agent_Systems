@@ -749,20 +749,23 @@ def check_item_stock(item_name: str, as_of_date: str) -> str:
 
     Returns:
         A string with item stock level, unit price, min stock level, and whether reorder is needed.
+        Prefixed with SUBSTITUTE PROPOSED when the match is not the product that was asked for.
     """
-    # TODO: Implement this tool. Report the stock level and details for one item.
-    # Hint: First map the input to a real catalog name with _resolve_item_name(item_name).
-    # Hint: Get current stock with get_stock_level(item_name, as_of_date). It returns a
-    #       DataFrame; read the value with df["current_stock"].iloc[0] (guard for empty).
-    # Hint: Look up unit_price and min_stock_level from the `inventory` table, e.g.
-    #       pd.read_sql("SELECT * FROM inventory WHERE item_name = :name", db_engine,
-    #                   params={"name": item_name})
-    # Hint: An item can exist in paper_supplies but not be carried in inventory (stock 0).
-    #       Handle that case, and the "not found anywhere" case, with clear messages.
-    # Hint: Flag reorder when stock <= min_stock_level. Return a readable multi-line string.
     resolved = _resolve_item_name(item_name)
     if resolved is None:
         return f"'{item_name}' is not in the catalog and is unavailable."
+
+    specs = {"a0", "a1", "a2", "a3", "a5", "a6", "b4", "b5", "tabloid", "ledger", "11x17"}
+    bad = sorted(set(item_name.lower().replace("-", " ").replace(",", " ").split()) & specs)
+    if bad:
+        prefix = (f"SUBSTITUTE PROPOSED - '{item_name}' calls for "
+                  f"{', '.join(s.upper() for s in bad)}, a size we do not carry. "
+                  f"Closest catalog product: '{resolved}'.\n")
+    elif resolved.lower() not in item_name.lower() and item_name.lower() not in resolved.lower():
+        prefix = (f"SUBSTITUTE PROPOSED - '{item_name}' is not a catalog product. "
+                  f"Closest catalog product: '{resolved}'.\n")
+    else:
+        prefix = ""
 
     stock_df = get_stock_level(resolved, as_of_date)
     stock = int(stock_df["current_stock"].iloc[0]) if not stock_df.empty else 0
@@ -771,12 +774,12 @@ def check_item_stock(item_name: str, as_of_date: str) -> str:
 
     if inv_df.empty:
         unit_price = next(p["unit_price"] for p in paper_supplies if p["item_name"] == resolved)
-        return (f"{resolved}: not carried in inventory (stock 0) as of {as_of_date}.\n"
+        return (f"{prefix}{resolved}: not carried in inventory (stock 0) as of {as_of_date}.\n"
                 f"  Catalog price ${unit_price:.2f}/unit - must be ordered from the supplier.")
 
     unit_price = float(inv_df["unit_price"].iloc[0])
     min_level = int(inv_df["min_stock_level"].iloc[0])
-    return (f"{resolved} as of {as_of_date}:\n"
+    return (f"{prefix}{resolved} as of {as_of_date}:\n"
             f"  stock={stock}, min_level={min_level}, unit_price=${unit_price:.2f}\n"
             f"  reorder needed: {'YES' if stock <= min_level else 'NO'}")
     # raise NotImplementedError("TODO: implement check_item_stock")
@@ -797,17 +800,6 @@ def reorder_stock(item_name: str, quantity: int, order_date: str) -> str:
     Returns:
         A string confirming the reorder or explaining why it cannot be fulfilled.
     """
-    # TODO: Implement this tool. Place a supplier reorder and record it as a transaction.
-    # Hint: Resolve the name first with _resolve_item_name(item_name).
-    # Hint: Find the unit_price (from the `inventory` table, or fall back to paper_supplies).
-    #       If it is in neither, return an error string.
-    # Hint: total_cost = quantity * unit_price.
-    # Hint: Check funds with get_cash_balance(order_date). If total_cost > cash, refuse.
-    # Hint: Get the arrival date with get_supplier_delivery_date(order_date, quantity).
-    # Hint: Record it: create_transaction(item_name, "stock_orders", quantity, total_cost,
-    #       delivery_date). Return a confirmation string including the transaction id.
-    # raise NotImplementedError("TODO: implement reorder_stock")
-
     resolved = _resolve_item_name(item_name)
     if resolved is None:
         return f"Cannot reorder: '{item_name}' is not in the catalog."
@@ -822,13 +814,13 @@ def reorder_stock(item_name: str, quantity: int, order_date: str) -> str:
     total_cost = quantity * unit_price
     cash = get_cash_balance(order_date)
     if total_cost > cash:
-        return (f"Cannot reorder {quantity} units of {resolved}: cost ${total_cost:.2f} exceeds "
-                f"the cash balance of ${cash:.2f} as of {order_date}.")
+        return (f"Cannot reorder {quantity} units of {resolved}: the purchase cost exceeds the "
+                f"funds available on {order_date}.")
 
     delivery_date = get_supplier_delivery_date(order_date, quantity)
     tx_id = create_transaction(resolved, "stock_orders", quantity, total_cost, delivery_date)
-    return (f"Reordered {quantity} units of {resolved} for ${total_cost:.2f} (transaction {tx_id}). "
-            f"Expected delivery {delivery_date}. Cash remaining: ${cash - total_cost:.2f}")
+    return (f"Reordered {quantity} units of {resolved} (transaction {tx_id}). "
+            f"Expected delivery {delivery_date}.")
 
 # Tools for quoting agent
 
@@ -844,15 +836,6 @@ def get_quote_history(search_terms: str) -> str:
     Returns:
         A formatted string of matching historical quotes with amounts and explanations.
     """
-    # TODO: Implement this tool. Search past quotes and return them as a readable string.
-    # Hint: search_terms arrives as a comma-separated string. Split it into a list of terms
-    #       (strip whitespace, drop empties).
-    # Hint: Call search_quote_history(terms, limit=5). It returns a list of dicts with keys
-    #       like 'original_request', 'total_amount', 'quote_explanation', 'job_type',
-    #       'order_size', 'event_type'.
-    # Hint: If the list is empty, say so. Otherwise format each result into a few lines.
-    # raise NotImplementedError("TODO: implement get_quote_history")
-
     terms = [t.strip() for t in search_terms.split(",") if t.strip()]
     results = search_quote_history(terms, limit=5)
     if not results:
@@ -868,37 +851,38 @@ def get_quote_history(search_terms: str) -> str:
     return "\n".join(result_lines)
 
 @tool
-def generate_quote(item_name: str, quantity: int, as_of_date: str) -> str:
+def generate_quote(item_name: str, quantity: int, as_of_date: str, needed_by: str) -> str:
     """
     Generate a price quote for a customer based on item, quantity, and current inventory.
     Applies bulk discounts: 5% for 100-499 units, 10% for 500-999, 15% for 1000+.
-    The item_name will be fuzzy-matched to the closest item in the catalog.
+    The item_name will be fuzzy-matched to the closest item in the catalog. Flags the quote
+    as SUBSTITUTE PROPOSED if the match is not the product requested, and DEADLINE NOT MET
+    if delivery would land after needed_by.
 
     Args:
         item_name: The name of the item the customer wants (fuzzy-matched).
         quantity: The number of units requested.
         as_of_date: ISO-formatted date (YYYY-MM-DD) for the quote.
+        needed_by: Date the customer needs delivery (YYYY-MM-DD), or "none" if not stated.
 
     Returns:
         A formatted quote string including pricing, discounts, availability, and delivery estimate.
     """
-    # TODO: Implement this tool. Produce a customer price quote for one item.
-    # Hint: Resolve the name with _resolve_item_name(item_name).
-    # Hint: Find unit_price and current stock. If the item is known but not stocked,
-    #       treat current stock as 0 (it can still be quoted and ordered in).
-    # Hint: Apply bulk discount tiers based on quantity:
-    #         >= 1000  -> 15%
-    #         >= 500   -> 10%
-    #         >= 100   -> 5%
-    #         otherwise 0%
-    # Hint: base_price = quantity * unit_price; subtract the discount to get the final price.
-    # Hint: Decide availability: fully in stock (deliver on as_of_date), partial (compute the
-    #       shortfall and use get_supplier_delivery_date(as_of_date, shortfall)), or out of
-    #       stock (order the full quantity). Return a clear, formatted quote string.
-    # raise NotImplementedError("TODO: implement generate_quote")
     resolved = _resolve_item_name(item_name)
     if resolved is None:
         return f"Cannot quote '{item_name}': not available in our catalog."
+
+    specs = {"a0", "a1", "a2", "a3", "a5", "a6", "b4", "b5", "tabloid", "ledger", "11x17"}
+    bad = sorted(set(item_name.lower().replace("-", " ").replace(",", " ").split()) & specs)
+    if bad:
+        prefix = (f"SUBSTITUTE PROPOSED - customer must approve. '{item_name}' calls for "
+                  f"{', '.join(s.upper() for s in bad)}, a size we do not carry. "
+                  f"Quoting '{resolved}' instead.\n")
+    elif resolved.lower() not in item_name.lower() and item_name.lower() not in resolved.lower():
+        prefix = (f"SUBSTITUTE PROPOSED - customer must approve. '{item_name}' is not a catalog "
+                  f"product. Quoting '{resolved}' instead.\n")
+    else:
+        prefix = ""
 
     inv_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :name",
                          db_engine, params={"name": resolved})
@@ -914,6 +898,12 @@ def generate_quote(item_name: str, quantity: int, as_of_date: str) -> str:
     base_price = quantity * unit_price
     total = base_price * (1 - discount)
 
+    if discount:
+        discount_line = (f"  Bulk discount {discount * 100:.0f}% for ordering {quantity} units "
+                         f"-> TOTAL ${total:.2f}")
+    else:
+        discount_line = f"  No bulk discount (applies from 100 units) -> TOTAL ${total:.2f}"
+
     if stock >= quantity:
         availability, delivery_date = f"in stock ({stock} units on hand)", as_of_date
     else:
@@ -921,50 +911,53 @@ def generate_quote(item_name: str, quantity: int, as_of_date: str) -> str:
         delivery_date = get_supplier_delivery_date(as_of_date, shortfall)
         availability = f"{stock} in stock, {shortfall} to be ordered from the supplier"
 
-    return (f"QUOTE for {quantity} units of {resolved} (as of {as_of_date}):\n"
+    late = (needed_by.strip().lower() not in ("", "none", "n/a", "null")
+            and delivery_date > needed_by.strip())
+    deadline_line = (f"\n  DEADLINE NOT MET: earliest delivery {delivery_date} is after the "
+                     f"required {needed_by}. Offer this date as an option and ask the customer "
+                     f"to accept it before ordering." if late else "")
+
+    return (f"{prefix}QUOTE for {quantity} units of {resolved} (as of {as_of_date}):\n"
             f"  Unit price ${unit_price:.2f} -> subtotal ${base_price:.2f}\n"
-            f"  Bulk discount {discount * 100:.0f}% -> TOTAL ${total:.2f}\n"
+            f"{discount_line}\n"
             f"  Availability: {availability}\n"
-            f"  Estimated delivery: {delivery_date}")
+            f"  Estimated delivery: {delivery_date}{deadline_line}")
 
 # Tools for ordering agent
 
 @tool
-def fulfill_order(item_name: str, quantity: int, order_date: str) -> str:
+def fulfill_order(item_name: str, quantity: int, order_date: str, needed_by: str) -> str:
     """
     Fulfill a customer order by recording a sales transaction. Checks stock availability
     and cash implications. If stock is insufficient, reorders from supplier first.
     The item_name will be fuzzy-matched to the closest item in the catalog.
+    The sale is NOT recorded, and NOT FULFILLED is returned, when the match is a substitute
+    for what was requested or when delivery would land after needed_by - both need the
+    customer's approval first.
 
     Args:
         item_name: The name of the item being sold (fuzzy-matched).
         quantity: The number of units the customer wants to buy.
         order_date: ISO-formatted date (YYYY-MM-DD) for the sale.
+        needed_by: Date the customer needs delivery (YYYY-MM-DD), or "none" if not stated.
 
     Returns:
         A string confirming the order fulfillment or explaining why it cannot be completed.
     """
-    # TODO: Implement this tool. Record a sale, reordering stock first if needed.
-    # This is the most involved tool. A suggested sequence:
-    #   1. Resolve the name with _resolve_item_name(item_name).
-    #   2. Find unit_price and current stock (known-but-not-stocked items start at 0).
-    #   3. Compute sale_price using the SAME bulk-discount tiers as generate_quote.
-    #   4. If current stock < quantity:
-    #        - shortfall = quantity - current_stock; reorder_cost = shortfall * unit_price
-    #        - if get_cash_balance(order_date) < reorder_cost, refuse with a clear message
-    #        - otherwise record the restock:
-    #            delivery_date = get_supplier_delivery_date(order_date, shortfall)
-    #            create_transaction(item_name, "stock_orders", shortfall, reorder_cost, delivery_date)
-    #          and set fulfillment_date = delivery_date
-    #      else: fulfillment_date = order_date
-    #   5. Record the sale:
-    #        create_transaction(item_name, "sales", quantity, sale_price, fulfillment_date)
-    #   6. Return a confirmation string (item, quantity, total sale, fulfillment date, tx id).
-    # raise NotImplementedError("TODO: implement fulfill_order")
-
     resolved = _resolve_item_name(item_name)
     if resolved is None:
         return f"Cannot fulfill: '{item_name}' is not available in our catalog."
+
+    specs = {"a0", "a1", "a2", "a3", "a5", "a6", "b4", "b5", "tabloid", "ledger", "11x17"}
+    bad = sorted(set(item_name.lower().replace("-", " ").replace(",", " ").split()) & specs)
+    if bad or (resolved.lower() not in item_name.lower()
+               and item_name.lower() not in resolved.lower()):
+        reason = (f"calls for {', '.join(s.upper() for s in bad)}, a size we do not carry"
+                  if bad else "is not a catalog product")
+        return (f"NOT FULFILLED - substitution requires customer approval. '{item_name}' {reason}. "
+                f"The closest catalog product is '{resolved}'. Nothing has been ordered. Quote "
+                f"'{resolved}' to the customer and only re-submit this order, using that exact "
+                f"catalog name, once they approve.")
 
     inv_df = pd.read_sql("SELECT * FROM inventory WHERE item_name = :name",
                          db_engine, params={"name": resolved})
@@ -979,25 +972,33 @@ def fulfill_order(item_name: str, quantity: int, order_date: str) -> str:
     discount = 0.15 if quantity >= 1000 else 0.10 if quantity >= 500 else 0.05 if quantity >= 100 else 0.0
     sale_price = quantity * unit_price * (1 - discount)
 
-    restock = ""
-    if stock < quantity:
-        shortfall = quantity - stock
-        reorder_cost = shortfall * unit_price
-        cash = get_cash_balance(order_date)
-        if cash < reorder_cost:
-            return (f"Cannot fulfill {quantity} units of {resolved}: only {stock} in stock and "
-                    f"restocking {shortfall} units costs ${reorder_cost:.2f}, over the "
-                    f"${cash:.2f} cash balance. Not available in this quantity.")
-        fulfillment_date = get_supplier_delivery_date(order_date, shortfall)
-        create_transaction(resolved, "stock_orders", shortfall, reorder_cost, fulfillment_date)
-        restock = f" (restocked {shortfall} units for ${reorder_cost:.2f})"
-    else:
-        fulfillment_date = order_date
+    # Settle the delivery date and check the deadline before committing anything.
+    shortfall = max(0, quantity - stock)
+    fulfillment_date = get_supplier_delivery_date(order_date, shortfall) if shortfall else order_date
 
+    if (needed_by.strip().lower() not in ("", "none", "n/a", "null")
+            and fulfillment_date > needed_by.strip()):
+        return (f"NOT FULFILLED - a later delivery date requires customer approval. {resolved}: "
+                f"{stock} of {quantity} units are in stock; the rest would arrive "
+                f"{fulfillment_date}, after the {needed_by} deadline. Options: accept delivery on "
+                f"{fulfillment_date}, or take the {stock} units available by {order_date}. "
+                f"Nothing has been ordered - please confirm.")
+
+    restock = ""
+    if shortfall:
+        reorder_cost = shortfall * unit_price
+        if get_cash_balance(order_date) < reorder_cost:
+            return (f"NOT FULFILLED - {resolved}: only {stock} of the {quantity} units requested "
+                    f"are available, and we cannot bring in the remaining {shortfall} units at "
+                    f"this time. We can supply {stock} units on {order_date} if that helps.")
+        create_transaction(resolved, "stock_orders", shortfall, reorder_cost, fulfillment_date)
+        restock = f" (includes {shortfall} units brought in from our supplier)"
+
+    discount_text = (f", including a {discount * 100:.0f}% bulk discount for ordering "
+                     f"{quantity} units" if discount else "")
     tx_id = create_transaction(resolved, "sales", quantity, sale_price, fulfillment_date)
-    return (f"ORDER FULFILLED: {quantity} units of {resolved} for ${sale_price:.2f} "
-            f"({discount * 100:.0f}% bulk discount), fulfillment date {fulfillment_date}"
-            f"{restock}. Transaction {tx_id}.")
+    return (f"FULFILLED - {quantity} units of {resolved} for ${sale_price:.2f}{discount_text}. "
+            f"Delivery {fulfillment_date}{restock}. Order reference {tx_id}.")
 
 @tool
 def check_cash_balance(as_of_date: str) -> str:
@@ -1099,8 +1100,10 @@ quoting_agent = ToolCallingAgent(
     name="quoting_agent",
     description=(
         "Generates customer price quotes: checks comparable past quotes and current stock, then "
-        "prices the request with bulk discounts and a delivery estimate. "
-        "IMPORTANT: always pass the request date (YYYY-MM-DD) and EXACT catalog item names."
+        "prices the request with bulk discounts, a delivery date and the reason for the discount. "
+        "IMPORTANT: always pass the request date (YYYY-MM-DD) and EXACT catalog item names. If a "
+        "quote comes back marked SUBSTITUTE PROPOSED, report it as exactly that and include the "
+        "delivery date - never describe a substitute as the item the customer asked for."
     ),
     max_steps=6,
 )
@@ -1115,13 +1118,16 @@ sales_agent = ToolCallingAgent(
     model=model,
     name="sales_agent",
     description=(
-        "Fulfills customer orders by recording sales, restocking from the supplier when stock is "
-        "short, and reporting cash or financial summaries. "
-        "IMPORTANT: always pass the request date (YYYY-MM-DD) as order_date and EXACT catalog "
-        "item names; fulfill one item per call and report anything unfulfilled and why."
+        "Fulfills customer orders by recording sales and restocking from the supplier when stock "
+        "is short. "
+        "IMPORTANT: always pass the request date as order_date and EXACT catalog item names. "
+        "fulfill_order returns NOT FULFILLED when a substitute needs approval - relay that as a "
+        "request for confirmation and never report it as fulfilled. Always report the delivery "
+        "date it returns. Never repeat cash balances or financial summaries to the customer."
     ),
     max_steps=8,
 )
+
 # Orchestrator Agent - delegates to the specialist agents
 # TODO: Build the orchestrator. This is the agent the test harness calls.
 # Hints:
@@ -1144,10 +1150,20 @@ orchestrator_agent = ToolCallingAgent(
     name="orchestrator_agent",
     description=_agent_catalog_note + (
         "\nWORKFLOW:\n"
-        "1. Ask quoting_agent to quote each requested item, passing the exact request date.\n"
-        "2. Ask sales_agent to fulfill the items that can be fulfilled.\n"
-        "3. Ask inventory_agent to reorder anything that needs restocking first, then retry.\n"
-        "4. Reply with per-item price, status, delivery date, and any item not fulfilled and why."
+        "1. Note the request date and any required-by date in the request (e.g. 'for the event on "
+        "April 15').\n"
+        "2. Ask quoting_agent to quote each requested item, passing the exact request date.\n"
+        "3. Compare each quoted delivery date with the required-by date before ordering anything.\n"
+        "4. Ask sales_agent to fulfill only the items that are in the catalog and can arrive in "
+        "time; ask inventory_agent to reorder anything short.\n"
+        "5. Reply with per-item price, the reason for any discount, status and delivery date.\n"
+        "APPROVAL RULES - these override everything else:\n"
+        "- Only call an item fulfilled if a tool returned FULFILLED for that exact catalog name.\n"
+        "- SUBSTITUTE PROPOSED: name the catalog product offered, say the requested item is not "
+        "carried, and ask the customer to approve it. Do not order it or call it fulfilled.\n"
+        "- Delivery later than the required-by date: present that date as an option, alongside any "
+        "quantity available on time, and ask the customer to confirm before ordering.\n"
+        "- Never include cash balances, financial summaries or internal errors in the reply."
     ),
     max_steps=10,
     max_tool_threads=1 #fixes issue with max steps + 1 being called twice in parallel workflows. 
@@ -1225,9 +1241,12 @@ def run_test_scenarios():
 
         # Determine fulfillment status based on cash change
         if status != "error":
+            resp_lower = str(response).lower()
             if cash_change > 0:
                 status = "fulfilled"
-            elif cash_change == 0 and "not available" in str(response).lower():
+            elif "approval" in resp_lower or "please confirm" in resp_lower:
+                status = "pending_approval"
+            elif "not fulfilled" in resp_lower or "not available" in resp_lower:
                 status = "unfulfilled"
             else:
                 status = "fulfilled"
@@ -1251,6 +1270,7 @@ def run_test_scenarios():
                 "cash_change": round(cash_change, 2),
                 "inventory_value": round(current_inventory, 2),
                 "response_summary": response_summary,
+                "response": response_str,          # full, untruncated customer reply
             }
         )
 
